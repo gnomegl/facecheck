@@ -1,0 +1,358 @@
+#!/usr/bin/env bash
+
+# @describe FaceCheck.ID facial recognition reverse image search API client
+# @arg command "Command to run (upload, delete, search, info, status)" [string]
+# @arg value "Value to use (file path for upload, search ID for search/status)" [string]
+# @option -t --token "FaceCheck API token (can also use FACECHECK_API_TOKEN env var)" [string]
+# @option -s --search-id "Search ID for operations" [string]
+# @option -p --pic-id "Picture ID for delete operation" [string]
+# @flag   -r --reset "Reset previous images when uploading"
+# @flag   -w --with-progress "Return immediately with progress instead of waiting"
+# @flag   -d --demo "Search only first 100,000 faces for testing"
+# @flag   --shady-only "Search only shady content"
+# @flag   --status-only "Don't submit new search, just get status"
+# @flag   -j --json "Output raw JSON instead of formatted results"
+# @flag   -q --quiet "Suppress colored output"
+# @flag   -v --verbose "Show detailed request/response information"
+# @meta require-tools curl,jq,base64
+
+eval "$(argc --argc-eval "$0" "$@")"
+
+# Setup colors
+setup_colors() {
+  if [ "$argc_quiet" = 1 ] || [ -z "$TERM" ] || [ "$TERM" = "dumb" ]; then
+    bold="" reset="" blue="" green="" yellow="" cyan="" magenta="" red=""
+  else
+    bold=$(tput bold) reset=$(tput sgr0) blue=$(tput setaf 4) green=$(tput setaf 2)
+    yellow=$(tput setaf 3) cyan=$(tput setaf 6) magenta=$(tput setaf 5) red=$(tput setaf 1)
+  fi
+}
+setup_colors
+
+# Get API token from multiple sources
+get_api_token() {
+  if [ -n "$argc_token" ]; then
+    echo "$argc_token"
+  elif [ -n "$FACECHECK_API_TOKEN" ]; then
+    echo "$FACECHECK_API_TOKEN"
+  elif [ -f "$HOME/.config/facecheck/token" ]; then
+    cat "$HOME/.config/facecheck/token"
+  else
+    echo "${red}Error:${reset} No FaceCheck API token found." >&2
+    echo "Either:" >&2
+    echo "  1. Pass it with --token" >&2
+    echo "  2. Set FACECHECK_API_TOKEN environment variable" >&2
+    echo "  3. Save it to ~/.config/facecheck/token" >&2
+    exit 1
+  fi
+}
+API_TOKEN=$(get_api_token)
+API_BASE="https://facecheck.id"
+
+# Helper functions
+print_kv() {
+  printf "${bold}%s:${reset} %s\n" "$1" "$2"
+}
+
+print_section() {
+  printf "\n${bold}%s:${reset}\n" "$1"
+}
+
+log_verbose() {
+  [ "$argc_verbose" = 1 ] && echo "${cyan}[VERBOSE]${reset} $1" >&2
+}
+
+make_request() {
+  local method="$1"
+  local endpoint="$2"
+  local data="$3"
+  local content_type="$4"
+  local url="${API_BASE}${endpoint}"
+
+  log_verbose "Making $method request to: $url"
+
+  local curl_cmd="curl -s -X $method"
+  curl_cmd="$curl_cmd -H 'Authorization: $API_TOKEN'"
+
+  if [ -n "$content_type" ]; then
+    curl_cmd="$curl_cmd -H 'Content-Type: $content_type'"
+  fi
+
+  if [ -n "$data" ]; then
+    if [ "$method" = "POST" ] && [ "$content_type" = "multipart/form-data" ]; then
+      curl_cmd="$curl_cmd $data"
+    else
+      curl_cmd="$curl_cmd -d '$data'"
+    fi
+  fi
+
+  curl_cmd="$curl_cmd '$url'"
+
+  log_verbose "Executing: $curl_cmd"
+
+  local response=$(eval "$curl_cmd")
+
+  log_verbose "Response: $response"
+
+  if echo "$response" | jq -e '.error' >/dev/null 2>&1; then
+    error_msg=$(echo "$response" | jq -r '.error // "Unknown error"')
+    printf "${red}Error:${reset} FaceCheck API returned: ${red}%s${reset}\n" "$error_msg" >&2
+    exit 1
+  fi
+
+  echo "$response"
+}
+
+make_multipart_request() {
+  local endpoint="$1"
+  local file_path="$2"
+  local search_id="$3"
+  local reset_prev="$4"
+  local url="${API_BASE}${endpoint}"
+
+  log_verbose "Making multipart request to: $url"
+
+  local curl_cmd="curl -s -X POST"
+  curl_cmd="$curl_cmd -H 'Authorization: $API_TOKEN'"
+  curl_cmd="$curl_cmd -F 'images=@$file_path'"
+
+  if [ -n "$search_id" ]; then
+    curl_cmd="$curl_cmd -F 'id_search=$search_id'"
+  fi
+
+  if [ "$reset_prev" = "true" ]; then
+    curl_cmd="$curl_cmd -F 'reset_prev_images=true'"
+  fi
+
+  curl_cmd="$curl_cmd '$url'"
+
+  log_verbose "Executing: $curl_cmd"
+
+  local response=$(eval "$curl_cmd")
+
+  log_verbose "Response: $response"
+
+  if echo "$response" | jq -e '.error' >/dev/null 2>&1; then
+    error_msg=$(echo "$response" | jq -r '.error // "Unknown error"')
+    printf "${red}Error:${reset} FaceCheck API returned: ${red}%s${reset}\n" "$error_msg" >&2
+    exit 1
+  fi
+
+  echo "$response"
+}
+
+show_help() {
+  echo "${bold}FaceCheck.ID Facial Recognition API Client${reset}"
+  echo ""
+  echo "${bold}Commands:${reset}"
+  echo "  ${cyan}upload${reset}        Upload an image file for facial recognition search"
+  echo "  ${cyan}delete${reset}        Delete an image from a search request"
+  echo "  ${cyan}search${reset}        Start or get results of a facial recognition search"
+  echo "  ${cyan}info${reset}          Get account information and service status"
+  echo "  ${cyan}status${reset}        Get status of a specific search by ID"
+  echo ""
+  echo "${bold}Examples:${reset}"
+  echo "  ${green}$(basename "$0") upload photo.jpg${reset}"
+  echo "  ${green}$(basename "$0") upload photo.jpg --search-id 3vdi8t-s_8DAAA7D5E784616${reset}"
+  echo "  ${green}$(basename "$0") delete --search-id 3vdi8t-s_8DAAA7D5E784616 --pic-id abc123${reset}"
+  echo "  ${green}$(basename "$0") search 3vdi8t-s_8DAAA7D5E784616${reset}"
+  echo "  ${green}$(basename "$0") search 3vdi8t-s_8DAAA7D5E784616 --with-progress${reset}"
+  echo "  ${green}$(basename "$0") info${reset}"
+  echo "  ${green}$(basename "$0") status 3vdi8t-s_8DAAA7D5E784616${reset}"
+  echo ""
+  echo "${bold}Options:${reset}"
+  echo "  ${yellow}-t, --token${reset}         FaceCheck API token"
+  echo "  ${yellow}-s, --search-id${reset}     Search ID for operations"
+  echo "  ${yellow}-p, --pic-id${reset}        Picture ID for delete operation"
+  echo "  ${yellow}-r, --reset${reset}         Reset previous images when uploading"
+  echo "  ${yellow}-w, --with-progress${reset} Return immediately with progress"
+  echo "  ${yellow}-d, --demo${reset}          Search only first 100,000 faces"
+  echo "  ${yellow}--shady-only${reset}        Search only shady content"
+  echo "  ${yellow}--status-only${reset}       Don't submit new search, just get status"
+  echo "  ${yellow}-j, --json${reset}          Output raw JSON"
+  echo "  ${yellow}-q, --quiet${reset}         Suppress colored output"
+  echo "  ${yellow}-v, --verbose${reset}       Show detailed request/response information"
+}
+
+format_upload_response() {
+  local response="$1"
+  local search_id=$(echo "$response" | jq -r '.id_search // "N/A"')
+  local message=$(echo "$response" | jq -r '.message // "N/A"')
+  local progress=$(echo "$response" | jq -r '.progress // "N/A"')
+  local was_updated=$(echo "$response" | jq -r '.was_updated // false')
+  local input_count=$(echo "$response" | jq -r '.input | length // 0')
+
+  printf "${bold}Upload Result:${reset}\n"
+  print_kv "Search ID" "${green}${search_id}${reset}"
+  [ "$message" != "N/A" ] && print_kv "Message" "$message"
+  [ "$progress" != "N/A" ] && print_kv "Progress" "${yellow}${progress}%${reset}"
+  print_kv "Was Updated" "$([ "$was_updated" = "true" ] && echo "${green}Yes${reset}" || echo "${red}No${reset}")"
+  print_kv "Images Count" "${cyan}${input_count}${reset}"
+
+  if [ "$input_count" -gt 0 ]; then
+    print_section "Uploaded Images"
+    echo "$response" | jq -r '.input[] | "\(.id_pic // "N/A")|\(.url_source // "N/A")"' |
+      while IFS="|" read -r pic_id url_source; do
+        printf "  ${cyan}ID:${reset} ${blue}%s${reset}" "$pic_id"
+        [ "$url_source" != "N/A" ] && printf " ${cyan}Source:${reset} ${blue}%s${reset}" "$url_source"
+        printf "\n"
+      done
+  fi
+}
+
+format_search_response() {
+  local response="$1"
+  local search_id=$(echo "$response" | jq -r '.id_search // "N/A"')
+  local message=$(echo "$response" | jq -r '.message // "N/A"')
+  local progress=$(echo "$response" | jq -r '.progress // "N/A"')
+  local was_updated=$(echo "$response" | jq -r '.was_updated // false')
+  local new_seen_count=$(echo "$response" | jq -r '.new_seen_count // 0')
+
+  printf "${bold}Search Result:${reset}\n"
+  print_kv "Search ID" "${green}${search_id}${reset}"
+  [ "$message" != "N/A" ] && print_kv "Message" "$message"
+  [ "$progress" != "N/A" ] && print_kv "Progress" "${yellow}${progress}%${reset}"
+  print_kv "Was Updated" "$([ "$was_updated" = "true" ] && echo "${green}Yes${reset}" || echo "${red}No${reset}")"
+  print_kv "New Seen Count" "${cyan}${new_seen_count}${reset}"
+
+  # Check if we have output results
+  local has_output=$(echo "$response" | jq -r '.output != null')
+  if [ "$has_output" = "true" ]; then
+    local items_count=$(echo "$response" | jq -r '.output.items | length // 0')
+    local took_seconds=$(echo "$response" | jq -r '.output.tookSeconds // "N/A"')
+    local searched_faces=$(echo "$response" | jq -r '.output.searchedFaces // "N/A"')
+    local max_score=$(echo "$response" | jq -r '.output.max_score // "N/A"')
+    local is_demo=$(echo "$response" | jq -r '.output.demo // false')
+    local face_per_sec=$(echo "$response" | jq -r '.output.face_per_sec // "N/A"')
+
+    print_section "Search Results"
+    print_kv "Results Found" "${green}${items_count}${reset}"
+    [ "$took_seconds" != "N/A" ] && print_kv "Time Taken" "${yellow}${took_seconds}s${reset}"
+    [ "$searched_faces" != "N/A" ] && print_kv "Faces Searched" "${cyan}${searched_faces}${reset}"
+    [ "$max_score" != "N/A" ] && print_kv "Max Score" "${magenta}${max_score}${reset}"
+    [ "$face_per_sec" != "N/A" ] && print_kv "Faces per Second" "${cyan}${face_per_sec}${reset}"
+    print_kv "Demo Mode" "$([ "$is_demo" = "true" ] && echo "${yellow}Yes${reset}" || echo "${green}No${reset}")"
+
+    if [ "$items_count" -gt 0 ]; then
+      print_section "Matches"
+      echo "$response" | jq -r '.output.items[] | "\(.score)|\(.url.value // "N/A")|\(.group)|\(.seen // "N/A")"' |
+        sort -t'|' -k1,1nr | head -20 |
+        while IFS="|" read -r score url group seen; do
+          printf "${bold}* Score: ${magenta}%s${reset}" "$score"
+          [ "$group" != "0" ] && printf " ${cyan}Group: %s${reset}" "$group"
+          printf "\n"
+          [ "$url" != "N/A" ] && printf "  ${cyan}URL:${reset} ${blue}%s${reset}\n" "$url"
+          [ "$seen" != "N/A" ] && printf "  ${cyan}Seen:${reset} ${yellow}%s${reset}\n" "$seen"
+          printf "\n"
+        done
+    fi
+  fi
+}
+
+format_info_response() {
+  local response="$1"
+  local faces=$(echo "$response" | jq -r '.faces // "N/A"')
+  local is_online=$(echo "$response" | jq -r '.is_online // false')
+  local remaining_credits=$(echo "$response" | jq -r '.remaining_credits // "N/A"')
+  local has_credits=$(echo "$response" | jq -r '.has_credits_to_search // false')
+
+  printf "${bold}FaceCheck Service Information:${reset}\n"
+  print_kv "Service Status" "$([ "$is_online" = "true" ] && echo "${green}Online${reset}" || echo "${red}Offline${reset}")"
+  [ "$faces" != "N/A" ] && print_kv "Indexed Faces" "${cyan}$(printf "%'d" "$faces")${reset}"
+  [ "$remaining_credits" != "N/A" ] && print_kv "Remaining Credits" "${yellow}${remaining_credits}${reset}"
+  print_kv "Can Search" "$([ "$has_credits" = "true" ] && echo "${green}Yes${reset}" || echo "${red}No${reset}")"
+}
+
+format_delete_response() {
+  local response="$1"
+  local message=$(echo "$response" | jq -r '.message // "N/A"')
+  local search_id=$(echo "$response" | jq -r '.id_search // "N/A"')
+
+  printf "${bold}Delete Result:${reset}\n"
+  [ "$search_id" != "N/A" ] && print_kv "Search ID" "${green}${search_id}${reset}"
+  [ "$message" != "N/A" ] && print_kv "Message" "$message"
+}
+
+# Main command processing
+if [ -z "$argc_command" ]; then
+  show_help
+  exit 0
+fi
+
+# Process commands
+case "$argc_command" in
+upload)
+  if [ -z "$argc_value" ]; then
+    echo "${red}Error:${reset} Image file path is required." >&2
+    exit 1
+  fi
+
+  if [ ! -f "$argc_value" ]; then
+    echo "${red}Error:${reset} File not found: $argc_value" >&2
+    exit 1
+  fi
+
+  # Check if file is an image
+  if ! file "$argc_value" | grep -qE "(image|bitmap)"; then
+    echo "${red}Warning:${reset} File does not appear to be an image: $argc_value" >&2
+  fi
+
+  reset_prev="false"
+  [ "$argc_reset" = 1 ] && reset_prev="true"
+
+  response=$(make_multipart_request "/api/upload_pic" "$argc_value" "$argc_search_id" "$reset_prev")
+  [ "$argc_json" = 1 ] && echo "$response" | jq || format_upload_response "$response"
+  ;;
+
+delete)
+  if [ -z "$argc_search_id" ] || [ -z "$argc_pic_id" ]; then
+    echo "${red}Error:${reset} Both search ID and picture ID are required." >&2
+    exit 1
+  fi
+
+  response=$(make_request "POST" "/api/delete_pic?id_search=${argc_search_id}&id_pic=${argc_pic_id}" "" "")
+  [ "$argc_json" = 1 ] && echo "$response" | jq || format_delete_response "$response"
+  ;;
+
+search)
+  search_id="${argc_value:-$argc_search_id}"
+  if [ -z "$search_id" ]; then
+    echo "${red}Error:${reset} Search ID is required." >&2
+    exit 1
+  fi
+
+  # Build search data JSON
+  search_data="{\"id_search\":\"$search_id\""
+  [ "$argc_with_progress" = 1 ] && search_data="$search_data,\"with_progress\":true"
+  [ "$argc_demo" = 1 ] && search_data="$search_data,\"demo\":true"
+  [ "$argc_shady_only" = 1 ] && search_data="$search_data,\"shady_only\":true"
+  [ "$argc_status_only" = 1 ] && search_data="$search_data,\"status_only\":true"
+  search_data="$search_data}"
+
+  response=$(make_request "POST" "/api/search" "$search_data" "application/json")
+  [ "$argc_json" = 1 ] && echo "$response" | jq || format_search_response "$response"
+  ;;
+
+status)
+  search_id="${argc_value:-$argc_search_id}"
+  if [ -z "$search_id" ]; then
+    echo "${red}Error:${reset} Search ID is required." >&2
+    exit 1
+  fi
+
+  search_data="{\"id_search\":\"$search_id\",\"status_only\":true}"
+  response=$(make_request "POST" "/api/search" "$search_data" "application/json")
+  [ "$argc_json" = 1 ] && echo "$response" | jq || format_search_response "$response"
+  ;;
+
+info)
+  response=$(make_request "POST" "/api/info" "" "")
+  [ "$argc_json" = 1 ] && echo "$response" | jq || format_info_response "$response"
+  ;;
+
+*)
+  echo "${red}Error:${reset} Unknown command: ${argc_command}" >&2
+  show_help
+  exit 1
+  ;;
+esac
