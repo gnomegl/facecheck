@@ -7,6 +7,7 @@
 # @option -s --search-id "Search ID for operations" [string]
 # @option -p --pic-id "Picture ID for delete operation" [string]
 # @flag   -r --reset "Reset previous images when uploading"
+# @flag   -a --auto-poll "Automatically poll for results after upload"
 # @flag   -w --with-progress "Return immediately with progress instead of waiting"
 # @flag   -d --demo "Search only first 100,000 faces for testing"
 # @flag   --shady-only "Search only shady content"
@@ -14,6 +15,7 @@
 # @flag   -j --json "Output raw JSON instead of formatted results"
 # @flag   -q --quiet "Suppress colored output"
 # @flag   -v --verbose "Show detailed request/response information"
+# @flag   --save-thumbs "Save base64 thumbnails to files in current directory"
 # @meta require-tools curl,jq,base64
 
 # ARGC-BUILD {
@@ -54,6 +56,7 @@ OPTIONS:
   -s, --search-id <SEARCH-ID>  "Search ID for operations" [string]
   -p, --pic-id <PIC-ID>        "Picture ID for delete operation" [string]
   -r, --reset                  "Reset previous images when uploading"
+  -a, --auto-poll              "Automatically poll for results after upload"
   -w, --with-progress          "Return immediately with progress instead of waiting"
   -d, --demo                   "Search only first 100,000 faces for testing"
       --shady-only             "Search only shady content"
@@ -61,6 +64,7 @@ OPTIONS:
   -j, --json                   "Output raw JSON instead of formatted results"
   -q, --quiet                  "Suppress colored output"
   -v, --verbose                "Show detailed request/response information"
+      --save-thumbs            "Save base64 thumbnails to files in current directory"
   -h, --help                   Print help
   -V, --version                Print version
 EOF
@@ -127,6 +131,17 @@ _argc_parse() {
                 _argc_die "error: the argument \`--reset\` cannot be used multiple times"
             else
                 argc_reset=1
+            fi
+            ;;
+        --auto-poll | -a)
+            if [[ "$_argc_item" == *=* ]]; then
+                _argc_die "error: flag \`--auto-poll\` don't accept any value"
+            fi
+            _argc_index=$((_argc_index + 1))
+            if [[ -n "${argc_auto_poll:-}" ]]; then
+                _argc_die "error: the argument \`--auto-poll\` cannot be used multiple times"
+            else
+                argc_auto_poll=1
             fi
             ;;
         --with-progress | -w)
@@ -204,6 +219,17 @@ _argc_parse() {
                 _argc_die "error: the argument \`--verbose\` cannot be used multiple times"
             else
                 argc_verbose=1
+            fi
+            ;;
+        --save-thumbs)
+            if [[ "$_argc_item" == *=* ]]; then
+                _argc_die "error: flag \`--save-thumbs\` don't accept any value"
+            fi
+            _argc_index=$((_argc_index + 1))
+            if [[ -n "${argc_save_thumbs:-}" ]]; then
+                _argc_die "error: the argument \`--save-thumbs\` cannot be used multiple times"
+            else
+                argc_save_thumbs=1
             fi
             ;;
         *)
@@ -444,7 +470,7 @@ make_request() {
 
   log_verbose "Response: $response"
 
-  if echo "$response" | jq -e '.error' >/dev/null 2>&1; then
+  if echo "$response" | jq -e '.error // false | . != false and . != null and . != ""' >/dev/null 2>&1; then
     error_msg=$(echo "$response" | jq -r '.error // "Unknown error"')
     printf "${red}Error:${reset} FaceCheck API returned: ${red}%s${reset}\n" "$error_msg" >&2
     exit 1
@@ -482,7 +508,7 @@ make_multipart_request() {
 
   log_verbose "Response: $response"
 
-  if echo "$response" | jq -e '.error' >/dev/null 2>&1; then
+  if echo "$response" | jq -e '.error // false | . != false and . != null and . != ""' >/dev/null 2>&1; then
     error_msg=$(echo "$response" | jq -r '.error // "Unknown error"')
     printf "${red}Error:${reset} FaceCheck API returned: ${red}%s${reset}\n" "$error_msg" >&2
     exit 1
@@ -503,6 +529,7 @@ show_help() {
   echo ""
   echo "${bold}Examples:${reset}"
   echo "  ${green}$(basename "$0") upload photo.jpg${reset}"
+  echo "  ${green}$(basename "$0") upload photo.jpg --auto-poll${reset}"
   echo "  ${green}$(basename "$0") upload photo.jpg --search-id 3vdi8t-s_8DAAA7D5E784616${reset}"
   echo "  ${green}$(basename "$0") delete --search-id 3vdi8t-s_8DAAA7D5E784616 --pic-id abc123${reset}"
   echo "  ${green}$(basename "$0") search 3vdi8t-s_8DAAA7D5E784616${reset}"
@@ -515,6 +542,7 @@ show_help() {
   echo "  ${yellow}-s, --search-id${reset}     Search ID for operations"
   echo "  ${yellow}-p, --pic-id${reset}        Picture ID for delete operation"
   echo "  ${yellow}-r, --reset${reset}         Reset previous images when uploading"
+  echo "  ${yellow}-a, --auto-poll${reset}     Automatically poll for results after upload"
   echo "  ${yellow}-w, --with-progress${reset} Return immediately with progress"
   echo "  ${yellow}-d, --demo${reset}          Search only first 100,000 faces"
   echo "  ${yellow}--shady-only${reset}        Search only shady content"
@@ -522,6 +550,7 @@ show_help() {
   echo "  ${yellow}-j, --json${reset}          Output raw JSON"
   echo "  ${yellow}-q, --quiet${reset}         Suppress colored output"
   echo "  ${yellow}-v, --verbose${reset}       Show detailed request/response information"
+  echo "  ${yellow}--save-thumbs${reset}       Save base64 thumbnails to files"
 }
 
 format_upload_response() {
@@ -585,14 +614,41 @@ format_search_response() {
 
     if [ "$items_count" -gt 0 ]; then
       print_section "Matches"
-      echo "$response" | jq -r '.output.items[] | "\(.score)|\(.url.value // "N/A")|\(.group)|\(.seen // "N/A")"' |
+      # Debug: show first item structure
+      if [ "$argc_verbose" = 1 ]; then
+        echo "Debug - First item structure:" >&2
+        echo "$response" | jq '.output.items[0]' >&2
+      fi
+      
+      # Counter for thumbnail files
+      local thumb_counter=0
+      
+      echo "$response" | jq -r '.output.items[] | "\(.score)|\(.url // "N/A")|\(.group // 0)|\(.seen // "N/A")|\(.base64 // "N/A")"' |
         sort -t'|' -k1,1nr | head -20 |
-        while IFS="|" read -r score url group seen; do
+        while IFS="|" read -r score url group seen base64_img; do
           printf "${bold}* Score: ${magenta}%s${reset}" "$score"
           [ "$group" != "0" ] && printf " ${cyan}Group: %s${reset}" "$group"
           printf "\n"
           [ "$url" != "N/A" ] && printf "  ${cyan}URL:${reset} ${blue}%s${reset}\n" "$url"
           [ "$seen" != "N/A" ] && printf "  ${cyan}Seen:${reset} ${yellow}%s${reset}\n" "$seen"
+          
+          if [ "$base64_img" != "N/A" ] && [ -n "$base64_img" ]; then
+            # Show that a thumbnail is available (truncate base64 for display)
+            base64_preview=$(echo "$base64_img" | cut -c1-50)
+            printf "  ${cyan}Thumbnail:${reset} ${yellow}[Base64 WEBP image available]${reset} ${magenta}${base64_preview}...${reset}\n"
+            
+            # Save thumbnail if requested
+            if [ "$argc_save_thumbs" = 1 ]; then
+              thumb_counter=$((thumb_counter + 1))
+              thumb_filename="facecheck_thumb_${search_id}_${thumb_counter}_score${score}.webp"
+              echo "$base64_img" | base64 -d > "$thumb_filename" 2>/dev/null
+              if [ $? -eq 0 ]; then
+                printf "  ${green}Saved to:${reset} ${blue}%s${reset}\n" "$thumb_filename"
+              else
+                printf "  ${red}Failed to save thumbnail${reset}\n"
+              fi
+            fi
+          fi
           printf "\n"
         done
     fi
@@ -623,6 +679,39 @@ format_delete_response() {
   [ "$message" != "N/A" ] && print_kv "Message" "$message"
 }
 
+poll_search_progress() {
+  local search_id="$1"
+  local demo_mode="${2:-false}"
+  local search_data="{\"id_search\":\"$search_id\",\"with_progress\":true,\"demo\":$demo_mode}"
+  
+  log_verbose "Starting progress polling for search ID: $search_id"
+  
+  while true; do
+    response=$(make_request "POST" "/api/search" "$search_data" "application/json")
+    
+    # Check if we have output (search complete)
+    if echo "$response" | jq -e '.output' >/dev/null 2>&1; then
+      printf "\n"  # New line after progress updates
+      format_search_response "$response"
+      break
+    fi
+    
+    # Extract progress and message
+    progress=$(echo "$response" | jq -r '.progress // -1')
+    message=$(echo "$response" | jq -r '.message // "Processing"')
+    
+    # Display progress on same line
+    printf "\r${yellow}%s${reset} Progress: ${cyan}%s%%${reset}    " "$message" "$progress"
+    
+    # If progress is still -1 after a few attempts, there might be an issue
+    if [ "$progress" = "-1" ]; then
+      sleep 2
+    else
+      sleep 1
+    fi
+  done
+}
+
 # Main command processing
 if [ -z "$argc_command" ]; then
   show_help
@@ -651,7 +740,31 @@ upload)
   [ "$argc_reset" = 1 ] && reset_prev="true"
 
   response=$(make_multipart_request "/api/upload_pic" "$argc_value" "$argc_search_id" "$reset_prev")
-  [ "$argc_json" = 1 ] && echo "$response" | jq || format_upload_response "$response"
+  
+  if [ "$argc_json" = 1 ]; then
+    echo "$response" | jq
+  else
+    format_upload_response "$response"
+    
+    # Auto-poll for results if requested
+    if [ "$argc_auto_poll" = 1 ]; then
+      search_id=$(echo "$response" | jq -r '.id_search // ""')
+      if [ -n "$search_id" ] && [ "$search_id" != "null" ]; then
+        printf "\n${bold}Polling for search results...${reset}\n"
+        demo_mode="false"
+        [ "$argc_demo" = 1 ] && demo_mode="true"
+        poll_search_progress "$search_id" "$demo_mode"
+      fi
+    else
+      # Provide helpful message if not auto-polling
+      search_id=$(echo "$response" | jq -r '.id_search // ""')
+      if [ -n "$search_id" ] && [ "$search_id" != "null" ]; then
+        printf "\n${cyan}Tip:${reset} To check search progress, run:\n"
+        printf "  ${green}%s search %s${reset}\n" "$(basename "$0")" "$search_id"
+        printf "Or use ${yellow}-a${reset} flag to auto-poll after upload\n"
+      fi
+    fi
+  fi
   ;;
 
 delete)
