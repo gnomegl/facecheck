@@ -248,6 +248,7 @@ format_search_response() {
 
       # Counter for thumbnail files
       local thumb_counter=0
+      export FACECHECK_SEARCH_ID="$search_id"
 
       echo "$response" | jq -r '.output.items[] | "\(.score)|\(.url // "N/A")|\(.group // 0)|\(.seen // "N/A")|\(.base64 // "N/A")"' |
         sort -t'|' -k1,1nr | head -20 |
@@ -266,17 +267,23 @@ format_search_response() {
             if [ "$argc_no_save_thumbs" != 1 ]; then
               thumb_counter=$((thumb_counter + 1))
 
-              thumb_dir="$search_id"
+              thumb_dir="$FACECHECK_SEARCH_ID"
               if [ ! -d "$thumb_dir" ]; then
-                mkdir -p "$thumb_dir"
+                mkdir -p "$thumb_dir" 2>/dev/null
+                if [ $? -ne 0 ]; then
+                  printf "  ${red}Failed to create thumbnail directory: %s${reset}\n" "$thumb_dir"
+                  continue
+                fi
               fi
 
-              thumb_filename="${thumb_dir}/thumb_${thumb_counter}_score${score}.webp"
-              echo "$base64_img" | base64 -d >"$thumb_filename" 2>/dev/null
-              if [ $? -eq 0 ]; then
+              clean_score=$(echo "$score" | tr -d '/:*?"<>|\\' | cut -c1-10)
+              thumb_filename="${thumb_dir}/thumb_${thumb_counter}_score${clean_score}.webp"
+
+              if echo "$base64_img" | base64 -d >"$thumb_filename" 2>/dev/null; then
                 printf "  ${green}Saved to:${reset} ${blue}%s${reset}\n" "$thumb_filename"
               else
-                printf "  ${red}Failed to save thumbnail${reset}\n"
+                printf "  ${red}Failed to save thumbnail${reset} (base64 decode error)\n"
+                rm -f "$thumb_filename" 2>/dev/null
               fi
             fi
           fi
