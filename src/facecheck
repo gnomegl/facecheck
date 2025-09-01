@@ -259,10 +259,11 @@ format_search_response() {
           [ "$url" != "N/A" ] && printf "  ${cyan}URL:${reset} ${blue}%s${reset}\n" "$url"
           [ "$seen" != "N/A" ] && printf "  ${cyan}Seen:${reset} ${yellow}%s${reset}\n" "$seen"
 
-          if [ "$base64_img" != "N/A" ] && [ -n "$base64_img" ]; then
-            # Show that a thumbnail is available (truncate base64 for display)
-            base64_preview=$(echo "$base64_img" | cut -c1-50)
-            printf "  ${cyan}Thumbnail:${reset} ${yellow}[Base64 WEBP image available]${reset} ${magenta}${base64_preview}...${reset}\n"
+           if [ "$base64_img" != "N/A" ] && [ -n "$base64_img" ]; then
+             # Show that a thumbnail is available (truncate base64 for display)
+             base64_preview=$(echo "$base64_img" | cut -c1-50)
+             printf "  ${cyan}Thumbnail:${reset} ${yellow}[Base64 WEBP image available]${reset} ${magenta}${base64_preview}...${reset}\n"
+             [ "$argc_verbose" = 1 ] && printf "  ${cyan}Base64 length:${reset} ${yellow}%d${reset} chars\n" "${#base64_img}" >&2
 
             if [ "$argc_no_save_thumbs" != 1 ]; then
               thumb_counter=$((thumb_counter + 1))
@@ -279,12 +280,51 @@ format_search_response() {
               clean_score=$(echo "$score" | tr -d '/:*?"<>|\\' | cut -c1-10)
               thumb_filename="${thumb_dir}/thumb_${thumb_counter}_score${clean_score}.webp"
 
-              if echo "$base64_img" | base64 -d >"$thumb_filename" 2>/dev/null; then
-                printf "  ${green}Saved to:${reset} ${blue}%s${reset}\n" "$thumb_filename"
-              else
-                printf "  ${red}Failed to save thumbnail${reset} (base64 decode error)\n"
-                rm -f "$thumb_filename" 2>/dev/null
-              fi
+               # Remove data URI prefix if present
+               clean_base64=$(echo "$base64_img" | sed 's/^data:image\/[^;]*;base64,//')
+
+               # Remove all whitespace characters (spaces, tabs, newlines, carriage returns)
+               clean_base64=$(echo "$clean_base64" | tr -d '[:space:]')
+
+               # Validate base64 data before decoding
+               if [ -z "$clean_base64" ] || [ "$clean_base64" = "null" ]; then
+                 printf "  ${red}Failed to save thumbnail${reset} (empty base64 data)\n"
+                 continue
+               fi
+
+               # Check for invalid base64 characters (only allow A-Z, a-z, 0-9, +, /, =)
+               if ! echo "$clean_base64" | grep -qE '^[A-Za-z0-9+/=]*$'; then
+                 printf "  ${red}Failed to save thumbnail${reset} (invalid base64 characters)\n"
+                 [ "$argc_verbose" = 1 ] && printf "  ${cyan}Invalid chars found in base64 data${reset}\n" >&2
+                 # Show what invalid characters were found
+                 if [ "$argc_verbose" = 1 ]; then
+                   invalid_chars=$(echo "$clean_base64" | sed 's/[A-Za-z0-9+/=]//g' | fold -w1 | sort -u | tr '\n' ' ')
+                   [ -n "$invalid_chars" ] && printf "  ${cyan}Invalid characters: ${red}%s${reset}\n" "$invalid_chars" >&2
+                 fi
+                 continue
+               fi
+
+               # Ensure proper base64 padding
+               padding_needed=$(( (4 - ${#clean_base64} % 4) % 4 ))
+               if [ $padding_needed -gt 0 ]; then
+                 clean_base64="${clean_base64}$(printf '%*s' $padding_needed | tr ' ' '=')"
+               fi
+
+               if echo "$clean_base64" | base64 -d >"$thumb_filename" 2>/dev/null; then
+                 printf "  ${green}Saved to:${reset} ${blue}%s${reset}\n" "$thumb_filename"
+               else
+                 printf "  ${red}Failed to save thumbnail${reset} (base64 decode error)\n"
+                 [ "$argc_verbose" = 1 ] && printf "  ${cyan}Base64 length: %d, padded length: %d${reset}\n" "${#base64_img}" "${#clean_base64}" >&2
+
+                 # In verbose mode, save the raw base64 for debugging
+                 if [ "$argc_verbose" = 1 ]; then
+                   debug_file="${thumb_filename}.base64"
+                   echo "$clean_base64" >"$debug_file"
+                   printf "  ${yellow}Saved raw base64 to:${reset} ${blue}%s${reset} ${cyan}(for debugging)${reset}\n" "$debug_file"
+                 fi
+
+                 rm -f "$thumb_filename" 2>/dev/null
+               fi
             fi
           fi
           printf "\n"
