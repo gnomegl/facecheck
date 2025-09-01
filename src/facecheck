@@ -15,7 +15,7 @@
 # @flag   -j --json "Output raw JSON instead of formatted results"
 # @flag   -q --quiet "Suppress colored output"
 # @flag   -v --verbose "Show detailed request/response information"
-# @flag   --save-thumbs "Save base64 thumbnails to files in current directory"
+# @flag   --no-save-thumbs "Don't save base64 thumbnails to files (thumbnails saved by default)"
 # @meta require-tools curl,jq,base64
 
 eval "$(argc --argc-eval "$0" "$@")"
@@ -176,7 +176,7 @@ show_help() {
   echo "  ${yellow}-j, --json${reset}          Output raw JSON"
   echo "  ${yellow}-q, --quiet${reset}         Suppress colored output"
   echo "  ${yellow}-v, --verbose${reset}       Show detailed request/response information"
-  echo "  ${yellow}--save-thumbs${reset}       Save base64 thumbnails to files"
+  echo "  ${yellow}--no-save-thumbs${reset}    Don't save base64 thumbnails to files (saved by default to search_id directory)"
 }
 
 format_upload_response() {
@@ -245,10 +245,10 @@ format_search_response() {
         echo "Debug - First item structure:" >&2
         echo "$response" | jq '.output.items[0]' >&2
       fi
-      
+
       # Counter for thumbnail files
       local thumb_counter=0
-      
+
       echo "$response" | jq -r '.output.items[] | "\(.score)|\(.url // "N/A")|\(.group // 0)|\(.seen // "N/A")|\(.base64 // "N/A")"' |
         sort -t'|' -k1,1nr | head -20 |
         while IFS="|" read -r score url group seen base64_img; do
@@ -257,17 +257,22 @@ format_search_response() {
           printf "\n"
           [ "$url" != "N/A" ] && printf "  ${cyan}URL:${reset} ${blue}%s${reset}\n" "$url"
           [ "$seen" != "N/A" ] && printf "  ${cyan}Seen:${reset} ${yellow}%s${reset}\n" "$seen"
-          
+
           if [ "$base64_img" != "N/A" ] && [ -n "$base64_img" ]; then
             # Show that a thumbnail is available (truncate base64 for display)
             base64_preview=$(echo "$base64_img" | cut -c1-50)
             printf "  ${cyan}Thumbnail:${reset} ${yellow}[Base64 WEBP image available]${reset} ${magenta}${base64_preview}...${reset}\n"
-            
-            # Save thumbnail if requested
-            if [ "$argc_save_thumbs" = 1 ]; then
+
+            if [ "$argc_no_save_thumbs" != 1 ]; then
               thumb_counter=$((thumb_counter + 1))
-              thumb_filename="facecheck_thumb_${search_id}_${thumb_counter}_score${score}.webp"
-              echo "$base64_img" | base64 -d > "$thumb_filename" 2>/dev/null
+
+              thumb_dir="$search_id"
+              if [ ! -d "$thumb_dir" ]; then
+                mkdir -p "$thumb_dir"
+              fi
+
+              thumb_filename="${thumb_dir}/thumb_${thumb_counter}_score${score}.webp"
+              echo "$base64_img" | base64 -d >"$thumb_filename" 2>/dev/null
               if [ $? -eq 0 ]; then
                 printf "  ${green}Saved to:${reset} ${blue}%s${reset}\n" "$thumb_filename"
               else
@@ -309,26 +314,26 @@ poll_search_progress() {
   local search_id="$1"
   local demo_mode="${2:-false}"
   local search_data="{\"id_search\":\"$search_id\",\"with_progress\":true,\"demo\":$demo_mode}"
-  
+
   log_verbose "Starting progress polling for search ID: $search_id"
-  
+
   while true; do
     response=$(make_request "POST" "/api/search" "$search_data" "application/json")
-    
+
     # Check if we have output (search complete)
     if echo "$response" | jq -e '.output' >/dev/null 2>&1; then
-      printf "\n"  # New line after progress updates
+      printf "\n" # New line after progress updates
       format_search_response "$response"
       break
     fi
-    
+
     # Extract progress and message
     progress=$(echo "$response" | jq -r '.progress // -1')
     message=$(echo "$response" | jq -r '.message // "Processing"')
-    
+
     # Display progress on same line
     printf "\r${yellow}%s${reset} Progress: ${cyan}%s%%${reset}    " "$message" "$progress"
-    
+
     # If progress is still -1 after a few attempts, there might be an issue
     if [ "$progress" = "-1" ]; then
       sleep 2
@@ -366,12 +371,12 @@ upload)
   [ "$argc_reset" = 1 ] && reset_prev="true"
 
   response=$(make_multipart_request "/api/upload_pic" "$argc_value" "$argc_search_id" "$reset_prev")
-  
+
   if [ "$argc_json" = 1 ]; then
     echo "$response" | jq
   else
     format_upload_response "$response"
-    
+
     # Auto-poll for results if requested
     if [ "$argc_auto_poll" = 1 ]; then
       search_id=$(echo "$response" | jq -r '.id_search // ""')
