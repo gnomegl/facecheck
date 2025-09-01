@@ -2,7 +2,7 @@
 
 # @describe FaceCheck.ID facial recognition reverse image search API client
 # @arg command "Command to run (upload, delete, search, info, status)" [string]
-# @arg value "Value to use (file path for upload, search ID for search/status)" [string]
+# @arg value "Value to use (file path or URL for upload, search ID for search/status)" [string]
 # @option -t --token "FaceCheck API token (can also use FACECHECK_API_TOKEN env var)" [string]
 # @option -s --search-id "Search ID for operations" [string]
 # @option -p --pic-id "Picture ID for delete operation" [string]
@@ -20,7 +20,6 @@
 
 eval "$(argc --argc-eval "$0" "$@")"
 
-# Setup colors
 setup_colors() {
   if [ "$argc_quiet" = 1 ] || [ -z "$TERM" ] || [ "$TERM" = "dumb" ]; then
     bold="" reset="" blue="" green="" yellow="" cyan="" magenta="" red=""
@@ -31,7 +30,6 @@ setup_colors() {
 }
 setup_colors
 
-# Get API token from multiple sources
 get_api_token() {
   if [ -n "$argc_token" ]; then
     echo "$argc_token"
@@ -51,7 +49,6 @@ get_api_token() {
 API_TOKEN=$(get_api_token)
 API_BASE="https://facecheck.id"
 
-# Helper functions
 print_kv() {
   printf "${bold}%s:${reset} %s\n" "$1" "$2"
 }
@@ -147,7 +144,7 @@ show_help() {
   echo "${bold}FaceCheck.ID Facial Recognition API Client${reset}"
   echo ""
   echo "${bold}Commands:${reset}"
-  echo "  ${cyan}upload${reset}        Upload an image file for facial recognition search"
+  echo "  ${cyan}upload${reset}        Upload an image file or URL for facial recognition search"
   echo "  ${cyan}delete${reset}        Delete an image from a search request"
   echo "  ${cyan}search${reset}        Start or get results of a facial recognition search"
   echo "  ${cyan}info${reset}          Get account information and service status"
@@ -155,6 +152,7 @@ show_help() {
   echo ""
   echo "${bold}Examples:${reset}"
   echo "  ${green}$(basename "$0") upload photo.jpg${reset}"
+  echo "  ${green}$(basename "$0") upload https://example.com/image.jpg${reset}"
   echo "  ${green}$(basename "$0") upload photo.jpg --auto-poll${reset}"
   echo "  ${green}$(basename "$0") upload photo.jpg --search-id 3vdi8t-s_8DAAA7D5E784616${reset}"
   echo "  ${green}$(basename "$0") delete --search-id 3vdi8t-s_8DAAA7D5E784616 --pic-id abc123${reset}"
@@ -240,7 +238,6 @@ format_search_response() {
 
     if [ "$items_count" -gt 0 ]; then
       print_section "Matches"
-      # Debug: show first item structure
       if [ "$argc_verbose" = 1 ]; then
         echo "Debug - First item structure:" >&2
         echo "$response" | jq '.output.items[0]' >&2
@@ -396,28 +393,68 @@ if [ -z "$argc_command" ]; then
   exit 0
 fi
 
-# Process commands
 case "$argc_command" in
 upload)
   if [ -z "$argc_value" ]; then
-    echo "${red}Error:${reset} Image file path is required." >&2
+    echo "${red}Error:${reset} Image file path or URL is required." >&2
     exit 1
   fi
 
-  if [ ! -f "$argc_value" ]; then
-    echo "${red}Error:${reset} File not found: $argc_value" >&2
-    exit 1
-  fi
+  # Determine if input is a URL or local file
+  file_to_upload=""
+  temp_file=""
+  
+  if echo "$argc_value" | grep -qE '^https?://'; then
+    # It's a URL - download it
+    log_verbose "Detected URL input: $argc_value"
+    
+    # Create temporary file
+    temp_file=$(mktemp /tmp/facecheck_XXXXXX.img)
+    log_verbose "Downloading to temporary file: $temp_file"
+    
+    # Download the file
+    if curl -s -L -o "$temp_file" "$argc_value"; then
+      # Check if downloaded file is valid
+      if [ ! -s "$temp_file" ]; then
+        echo "${red}Error:${reset} Downloaded file is empty" >&2
+        rm -f "$temp_file"
+        exit 1
+      fi
+      
+      # Check if it's an image
+      if ! file "$temp_file" | grep -qE "(image|bitmap)"; then
+        echo "${red}Warning:${reset} Downloaded file does not appear to be an image" >&2
+      fi
+      
+      file_to_upload="$temp_file"
+      log_verbose "Successfully downloaded image from URL"
+    else
+      echo "${red}Error:${reset} Failed to download image from URL: $argc_value" >&2
+      rm -f "$temp_file"
+      exit 1
+    fi
+  else
+    # It's a local file
+    if [ ! -f "$argc_value" ]; then
+      echo "${red}Error:${reset} File not found: $argc_value" >&2
+      exit 1
+    fi
 
-  # Check if file is an image
-  if ! file "$argc_value" | grep -qE "(image|bitmap)"; then
-    echo "${red}Warning:${reset} File does not appear to be an image: $argc_value" >&2
+    # Check if file is an image
+    if ! file "$argc_value" | grep -qE "(image|bitmap)"; then
+      echo "${red}Warning:${reset} File does not appear to be an image: $argc_value" >&2
+    fi
+    
+    file_to_upload="$argc_value"
   fi
 
   reset_prev="false"
   [ "$argc_reset" = 1 ] && reset_prev="true"
 
-  response=$(make_multipart_request "/api/upload_pic" "$argc_value" "$argc_search_id" "$reset_prev")
+  response=$(make_multipart_request "/api/upload_pic" "$file_to_upload" "$argc_search_id" "$reset_prev")
+  
+  # Clean up temporary file if we created one
+  [ -n "$temp_file" ] && rm -f "$temp_file"
 
   if [ "$argc_json" = 1 ]; then
     echo "$response" | jq
